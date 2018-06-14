@@ -1,0 +1,127 @@
+
+### 1、加载包
+import requests as rq
+from bs4 import BeautifulSoup as bp
+import pandas as pd
+import numpy as np
+from lxml import etree
+import re
+import datetime
+
+###2、使用get获取数据集内容 soup解析
+url = 'https://movie.douban.com/subject/26683723/'
+res = rq.get(url)
+res.encoding = 'utf-8'
+soup = bp(res.text,'html.parser')
+root = etree.HTML(res.text)
+
+###3、获取电影基本信息
+movie_info = {}
+movie_info['movie_name'] = root.xpath('//*[@id="content"]/h1/span[1]/text()')
+#movie_info['movie_othername'] = re.search('.*',soup.select('.subject clearfix .info'))
+movie_info['movie_diretor'] = root.xpath('//*[@id="info"]/span[1]/span[2]/a/text()')
+movie_info['movie_editor'] = root.xpath('//*[@id="info"]/span[2]/span[2]/a/text()')
+movie_info['movie_actor'] = root.xpath('//*[@id="info"]/span[3]/span[2]/a/text()')
+movie_info['movie_time'] = root.xpath('//*[@id="info"]/span[10]/text()')
+#使用正则表达式抽取电影制片地区
+# pattern = re.compile('<span property="v:genre">\S*</span>')
+# movie_info['movie_area'] = soup.search(pattern)
+movie_info['movie_area_language'] = ''.join(p.strip() for p in root.xpath('//*[@id="info"]/text()')[:])
+#movie_info['movie_language'] = root.xpath('//*[@id="info"]/span[8]/text()')
+movie_info['movie_time'] = root.xpath('//*[@id="info"]/span[10]/text()')
+movie_info['movie_score_avg'] = root.xpath('//*[@id="interest_sectl"]/div[1]/div[2]/strong/text()')
+movie_info['movie_score_div'] = ' '.join(p.text.strip() for p in soup.select('.rating_per'))
+movie_info['movie_story'] = '&#'.join(p.strip() for p in root.xpath('//*[@id="link-report"]/span/text()')[:])
+movie_info['movie_shortcoment_num'] = int(root.xpath('//*[@id="comments-section"]/div[1]/h2/span/a/text()')[0].lstrip('全部 ').rstrip(' 条'))
+movie_info['movie_longcoment_num'] = int(root.xpath('//*[@id="content"]/div[2]/div[1]/section[2]/header/h2/span/a/text()')[0].lstrip('全部 ').rstrip(' 条'))
+#print(movie_diretor,'\n', movie_editor ,'\n',movie_actor ,'\n',movie_area ,'\n',movie_language ,'\n',\
+#      movie_score_avg,movie_score_div,movie_story,movie_coment_num)
+#print('\nmovie_info:',movie_info)
+
+###4、获取电影短评论  豆瓣不登录现在只能看200条评论 登陆500条
+def get_short_comment(url,movie_shortcoment_num):
+    movie_short_comment_all = []
+    if movie_shortcoment_num > 200:
+        movie_shortcoment_num = 200
+    page_num = range(int(movie_shortcoment_num / 20) + 1)
+    url_comment_sorted_score_h = url+'comments?start={}&limit=20&' \
+                  'sort=new_score&status=P&percent_type=h'  ## 最好评分
+    url_comment_sorted_score_m = url+'comments?start={}&limit=20&' \
+                  'sort=new_score&status=P&percent_type=m' ## 一般评分
+    url_comment_sorted_score_l = url+'comments?start={}&limit=20&' \
+                  'sort=new_score&status=P&percent_type=l' ## 最低评分
+    url_comment_sorted_time = url+'comments?sort=time&status=P' ## 最新评分
+
+    def bianli(page_num,url):
+        for i in page_num:
+            # print('####### 正在爬取第 {} 页评论 ######'.format(i + 1))
+            res_com = rq.get(url.format(i * 20))
+            # print('url_status_code:',res_com.status_code)
+            res_com.encoding = 'utf-8'
+            soup = bp(res_com.text, 'html.parser')
+            # root = etree.HTML(res_com.text)
+            # comment_cell = root.xpath('//*[@id="comments"]/div/text()')
+            # print('comment_cell:',comment_cell)
+            for m in soup.select('.comment-item'):
+                temp = m.select('.comment-info span')
+                score = [c['title'] for c, j in zip(temp, range(len(temp))) if j % 3 == 1 and len(temp) == 3]
+                if len(score)>0 : pass
+                else: score=['未知']
+                comment_time = datetime.datetime.strptime(m.select('.comment-info .comment-time')[0]['title'].strip(),
+                                                     '%Y-%m-%d %H:%M:%S')
+                detail = [m.select('.comment p')[0].text.strip(), # 评论内容
+                        len(m.select('.comment p')[0].text.strip()), # 评论长度
+                        int(m.select('.comment-vote .votes')[0].text.strip()), # 有用数
+                        comment_time.hour,  # 评论时间-小时
+                        comment_time.day,  # 评论时间-日期
+                        comment_time,  # 评论时间
+                        m.select('.comment-info a')[0].text.strip(),  # 评论人
+                        score[0]]
+                movie_short_comment_all.append(detail) # 评分
+    # 按照不同类型评分排序抽取评论
+    bianli(page_num=page_num, url=url_comment_sorted_score_h)
+    bianli(page_num=page_num, url=url_comment_sorted_score_m)
+    bianli(page_num=page_num, url=url_comment_sorted_score_l)
+    bianli(page_num=page_num, url=url_comment_sorted_time)
+    return movie_short_comment_all
+
+movie_short_comment_all = get_short_comment(url = url,movie_shortcoment_num = movie_info['movie_shortcoment_num'] )
+
+#print('movie_short_comment_all:',movie_short_comment_all)
+
+###5、根据评论内容 预测电影评分
+
+from sklearn import naive_bayes as nb
+import random
+import numpy as np
+from sklearn import metrics
+from sklearn.model_selection import train_test_split
+import time
+from sklearn import tree
+
+### 构造特征向量
+print(movie_short_comment_all.__sizeof__())
+random.shuffle(movie_short_comment_all)
+tmp_sample = np.array(movie_short_comment_all)
+print('tmp_sample.shape:',tmp_sample.shape)
+
+X_data_train,X_data_test,Y_data_train,Y_data_test = train_test_split(tmp_sample[:,1:5],tmp_sample[:,7],random_state=33,test_size=0.3)## 按照指定系数分解
+
+print('X_data_train.shape',X_data_train.shape)
+print('X_data_train示例','\n',X_data_train[:5])
+print('Y_data_train示例','\n',Y_data_train[:5])
+
+### 调用模型 根据评论预测评分
+def scheduling_model(model):
+    start_time = time.time()
+    model_fit = model.fit(X_data_train, Y_data_train)
+    print("training time ：%fs "%(time.time() - start_time))
+    predicted = model.predict(X_data_test)
+    ## 模型效果
+    print('score',model_fit.score(X_data_test, Y_data_test))
+    print('Accuracy：', metrics.classification_report(Y_data_test, predicted))
+    print('confusion_matrix:',metrics.confusion_matrix(Y_data_test, predicted))
+
+print("\n调用Sklearn的tree.DecisionTreeClassifier ")
+model = tree.DecisionTreeClassifier()
+scheduling_model(model)
